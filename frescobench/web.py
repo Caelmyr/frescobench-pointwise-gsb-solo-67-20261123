@@ -8,6 +8,14 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
 from .demo import load_training, preview_photo
+from .fits import (
+    candidate_preview,
+    create_fit,
+    create_seam_scan,
+    marked_photo,
+    require_adopted,
+    station_lookup,
+)
 from .evidence import (
     artifact_json,
     create_evidence,
@@ -427,6 +435,100 @@ def register_desks(api, store, heavy):
         return binary_response(artifact_json(record), "application/json", name + ".json")
 
 
+    @api.post("/training/trial-pair")
+    def trial_pair_create():
+        from .trial_pair import load_trial_pair
+        with heavy:
+            tile_a, tile_b, fit = load_trial_pair(store)
+        return jsonify({
+            "fragment_a": tile_a["id"],
+            "fragment_b": tile_b["id"],
+            "fit_id": fit["id"],
+        }), 201
+
+
+def register_fits(api, store, heavy):
+    @api.get("/fits")
+    def fit_list():
+        items = [
+            {
+                "id": item["id"],
+                "title": item["title"],
+                "updated_at": item["updated_at"],
+                "adopted": item.get("adoption"),
+                "fragment_a": item["fragments"]["A"]["tile_name"],
+                "fragment_b": item["fragments"]["B"]["tile_name"],
+                "base_map_digest": item.get("base_map_digest"),
+            }
+            for item in store.list_fits()
+        ]
+        return jsonify({"items": items})
+
+    @api.post("/fits")
+    def fit_create():
+        with heavy:
+            record, decision = create_fit(store, json_request())
+        return jsonify({"fit": record, "adoption": decision}), 201
+
+    @api.get("/fits/<fit_id>")
+    def fit_show(fit_id):
+        return jsonify(store.fit(fit_id))
+
+    @api.delete("/fits/<fit_id>")
+    def fit_remove(fit_id):
+        store.delete_fit(fit_id)
+        return jsonify({"deleted": fit_id})
+
+    @api.post("/fits/marked-photo")
+    def fit_marked_photo():
+        data = json_request()
+        tile_id = identity(data["tile_id"], "Specimen ID")
+        photo_id = identity(data["photo_id"], "Photo ID")
+        from .fits import parse_marks
+        marks = parse_marks(data.get("marks"), "Fragment marks")
+        with heavy:
+            image = marked_photo(store, tile_id, photo_id, marks)
+        return image_response(image)
+
+    @api.get("/fits/<fit_id>/base-map.png")
+    def fit_base_map(fit_id):
+        record = require_adopted(store.fit(fit_id))
+        return png_blob(store, record["base_map_digest"])
+
+    @api.post("/fits/<fit_id>/candidate-preview")
+    def fit_candidate_preview(fit_id):
+        record = store.fit(fit_id)
+        data = json_request()
+        candidate_id = string(data.get("candidate_id"), "Candidate ID")
+        with heavy:
+            image = candidate_preview(store, record, candidate_id)
+        return image_response(image)
+
+    @api.get("/fits/<fit_id>/scans")
+    def seam_scan_list(fit_id):
+        return jsonify({"items": store.list_seam_scans(fit_id)})
+
+    @api.post("/fits/<fit_id>/scans")
+    def seam_scan_create(fit_id):
+        with heavy:
+            scan = create_seam_scan(store, fit_id, json_request())
+        return jsonify(scan), 201
+
+    @api.get("/scans/<scan_id>")
+    def seam_scan_show(scan_id):
+        return jsonify(store.seam_scan(scan_id))
+
+    @api.get("/scans/<scan_id>/image/<layer>")
+    def seam_scan_image(scan_id, layer):
+        scan = store.seam_scan(scan_id)
+        chosen = enumeration(layer, ("overlay", "base_map"), "Line scan image")
+        return png_blob(store, scan["pictures"][chosen])
+
+    @api.get("/fits/<fit_id>/scans/<scan_id>/stations/<int:station>")
+    def seam_station(fit_id, scan_id, station):
+        return jsonify(station_lookup(store, fit_id, scan_id, station))
+
+
 def register_training(api, store, heavy):
     @api.get("/training/hero.png")
     def synthetic_thumbnail():
@@ -507,5 +609,6 @@ def create_app(data_dir=None):
     register_measurements(api, store, heavy)
     register_artifacts(api, store, heavy)
     register_desks(api, store, heavy)
+    register_fits(api, store, heavy)
     app.register_blueprint(api)
     return app

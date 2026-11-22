@@ -1,10 +1,12 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
+import {fitState, registerFitShell, renderFitPage, openFitList, fitAction} from "./fits.js";
 
 const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
+  ["fits","Trial fits","frame"],
   ["references","Reference library","book"],
   ["studies","Fragment studies","plot"],
   ["received","Received evidence","archive"],
@@ -39,7 +41,10 @@ function chrome() {
   const crumb=state.page==="tile"
     ? `<a href="#collection">Specimens</a><span aria-hidden="true">/</span><strong>${e(state.tile?.name || "Specimen")}</strong>`
     : `<strong>${e(nav.find(([key])=>key===state.page)?.[1]||"Specimens")}</strong>`;
-  q("#mast").innerHTML=`<div class="breadcrumb">${crumb}</div><div class="actions">${state.page==="tile" ? btn("Add photo","photo-add","primary","plus") : btn("New specimen","tile-new","primary","plus")}</div>`;
+  const mastAction = state.page==="tile"
+    ? btn("Add photo","photo-add","primary","plus")
+    : state.page==="fits" ? "" : btn("New specimen","tile-new","primary","plus");
+  q("#mast").innerHTML=`<div class="breadcrumb">${crumb}</div><div class="actions">${mastAction}</div>`;
 }
 
 function cardTiles() {
@@ -245,6 +250,7 @@ function studyPage() {
 
 function render() {
   chrome();
+  if (state.page==="fits") { renderFitPage(); return; }
   q("#main").innerHTML={collection,tile:tilePage,references:libraryPage,studies:studyPage,received:receivedPage}[state.page]();
 }
 
@@ -264,6 +270,11 @@ async function gatherTile(token=travel) {
 async function route() {
   const token=++travel;
   const hash=location.hash.substring(1);
+  if (hash==="fits") {
+    state.page="fits";
+    await openFitList();
+    return;
+  }
   if (hash.startsWith("tile:")) {
     const id=hash.slice(5);
     if (!/^[a-f0-9]{24}$/.test(id)) throw Error("This specimen link is invalid.");
@@ -745,6 +756,7 @@ async function doAction(name,target) {
     close:commitModal,
   };
   if (functions[name]) await functions[name]();
+  else if (state.page === "fits") await fitAction(name, target);
 }
 
 function displayFault(err, inside=false) {
@@ -823,4 +835,6 @@ dialog.addEventListener("close",()=>{
   qa("[data-blob]",dialog).forEach(el=>URL.revokeObjectURL(el.dataset.blob));
 });
 window.addEventListener("hashchange",()=>{void route().catch(displayFault);});
+// Expose the shared modal shell so the trial-fit module renders its own forms.
+registerFitShell({notify:toast, modal, dismiss:commitModal});
 api("/api/configuration").then(config=>{state.config=config;return route();}).catch(displayFault);

@@ -65,6 +65,20 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS fits (
+    id TEXT PRIMARY KEY,
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seam_scans (
+    id TEXT PRIMARY KEY,
+    fit_id TEXT NOT NULL REFERENCES fits(id),
+    cache_key TEXT NOT NULL UNIQUE,
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS seam_scans_fit ON seam_scans(fit_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -240,6 +254,17 @@ class Store:
                 (source_key, document([tile["id"] for tile in tiles])),
             )
             return tiles
+
+    def insert_seed_tile(self, fields, source_key=None):
+        with self.transaction(write=True) as conn:
+            tile = self._insert_tile(conn, fields, "Loaded synthetic trial-fit material")
+            if source_key is not None:
+                row = conn.execute("SELECT value FROM settings WHERE key=?", (source_key,)).fetchone()
+                ids = json.loads(row["value"]) if row else []
+                ids.append(tile["id"])
+                conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
+                             (source_key, document(ids)))
+            return tile
 
     def seeded_tiles(self, source_key):
         with self.transaction() as conn:
@@ -474,3 +499,84 @@ class Store:
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Trial fits and fracture line scans
+    # ------------------------------------------------------------------
+    def save_fit(self, record):
+        now = timestamp()
+        record["created_at"] = now
+        record["updated_at"] = now
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO fits(id,document,created_at,updated_at) VALUES (?,?,?,?)",
+                (record["id"], document(record), now, now),
+            )
+            conn.execute(
+                "INSERT INTO events(tile_id,action,message,recorded_at) VALUES (?,?,?,?)",
+                (record["fragments"]["A"]["tile_id"], "fit",
+                 f"Saved trial fit {record['title']}", now),
+            )
+        return record
+
+    def update_fit(self, record):
+        now = timestamp()
+        record["updated_at"] = now
+        with self.transaction(write=True) as conn:
+            conn.execute("UPDATE fits SET document=?, updated_at=? WHERE id=?",
+                         (document(record), now, record["id"]))
+        return record
+
+    def _fit(self, conn, fit_id):
+        row = conn.execute("SELECT document FROM fits WHERE id=?", (identity(fit_id, "Trial fit ID"),)).fetchone()
+        return artifact_row(row, "Trial fit")
+
+    def fit(self, fit_id):
+        with self.connect() as conn:
+            return self._fit(conn, fit_id)
+
+    def list_fits(self):
+        with self.connect() as conn:
+            rows = conn.execute("SELECT document FROM fits ORDER BY rowid DESC LIMIT 100").fetchall()
+        return [json.loads(row["document"]) for row in rows]
+
+    def delete_fit(self, fit_id):
+        chosen = identity(fit_id, "Trial fit ID")
+        with self.transaction(write=True) as conn:
+            self._fit(conn, chosen)
+            conn.execute("DELETE FROM seam_scans WHERE fit_id=?", (chosen,))
+            conn.execute("DELETE FROM fits WHERE id=?", (chosen,))
+
+    def save_seam_scan(self, cache_key, record):
+        with self.transaction(write=True) as conn:
+            stored = conn.execute("SELECT document FROM seam_scans WHERE cache_key=?", (cache_key,)).fetchone()
+            if stored is not None:
+                return json.loads(stored["document"])
+            conn.execute(
+                "INSERT INTO seam_scans(id,fit_id,cache_key,document,created_at) VALUES (?,?,?,?,?)",
+                (record["id"], record["fit_id"], cache_key, document(record), record["created_at"]),
+            )
+            conn.execute(
+                "INSERT INTO events(tile_id,action,message,recorded_at) VALUES (?,?,?,?)",
+                (record["provenance"]["photos"][0]["tile_id"], "seam-scan",
+                 f"Saved fracture line scan {record['title']}", record["created_at"]),
+            )
+        return record
+
+    def _seam_scan(self, conn, scan_id):
+        row = conn.execute("SELECT document FROM seam_scans WHERE id=?",
+                           (identity(scan_id, "Fracture line scan ID"),)).fetchone()
+        return artifact_row(row, "Fracture line scan")
+
+    def seam_scan(self, scan_id):
+        with self.connect() as conn:
+            return self._seam_scan(conn, scan_id)
+
+    def list_seam_scans(self, fit_id):
+        chosen = identity(fit_id, "Trial fit ID")
+        with self.connect() as conn:
+            self._fit(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM seam_scans WHERE fit_id=? ORDER BY rowid DESC LIMIT 100", (chosen,),
+            ).fetchall()
+        return [json.loads(row["document"]) for row in rows]
