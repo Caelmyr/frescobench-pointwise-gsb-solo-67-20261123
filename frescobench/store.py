@@ -320,6 +320,19 @@ class Store:
             event(conn, result["tile_id"], "review", f"Updated {edited} defect review decision(s)")
             return result
 
+    def save_continuation(self, identifier, expected_version, continuation, action, message):
+        with self.transaction(write=True) as conn:
+            result = self._result(conn, identifier)
+            self.require_version(result, expected_version)
+            if continuation is None:
+                result.pop("continuation", None)
+            else:
+                result["continuation"] = continuation
+            result["version"] += 1
+            conn.execute("UPDATE results SET document=? WHERE id=?", (document(result), result["id"]))
+            event(conn, result["tile_id"], "continuity", message)
+            return result
+
     def _reference(self, conn, identifier):
         chosen = identity(identifier, "Reference ID")
         row = conn.execute("SELECT document FROM library WHERE id=?", (chosen,)).fetchone()

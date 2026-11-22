@@ -83,18 +83,80 @@ function scribeDetail(m) {
     <details><summary>Station readings</summary>${table([`Distance (${unit})`,`Left (${unit})`,"Left evidence",`Right (${unit})`,"Right evidence",`Total (${unit})`],rows)}</details>`;
 }
 
-function defectsDetail(record) {
+function defectsDetail(record, payload) {
   const markers=record.metrics.observations;
+  const continuation=payload?.continuation;
+  const earlierRows=continuation?.archive.earlier || [];
+  const earlierByLater=new Map(earlierRows.filter(row=>row.later_key).map(row=>[row.later_key,row]));
   if (!markers.length) return "<p>No spots exceeded this run's current thresholds.</p>";
   return `<h3>Review local observations</h3>
     <div class="divider-list scroll-list">${markers.map(marker=>{
       const decision=record.decisions[marker.key]?.decision || "review";
-      return `<div class="row"><div class="grow"><strong>${e(marker.key)} · ${e(marker.type)}</strong><br><small>${n(marker.area_pixels,0)} px · ${e(marker.polarity)} · ${e(decision)}</small></div>
+      const carried=earlierByLater.get(marker.key);
+      return `<div class="row"><div class="grow"><strong>${e(marker.key)} · ${e(marker.type)}</strong><br><small>${n(marker.area_pixels,0)} px · ${e(marker.polarity)} · ${e(decision)}${carried?` · continues earlier ${e(carried.key)} (${e(carried.previous_decision)}${carried.previous_notes?` · ${e(carried.previous_notes)}`:""})`:""}</small></div>
         ${btn("Confirm","defect-choice","tiny secondary",null,`data-marker="${e(marker.key)}" data-value="confirm"`)}
         ${btn("Dismiss","defect-choice","tiny ghost",null,`data-marker="${e(marker.key)}" data-value="dismiss"`)}
         ${btn("Note","defect-note","tiny ghost",null,`data-marker="${e(marker.key)}"`)}</div>`;
     }).join("")}</div>`;
 }
+
+function limitText(limits) {
+  return `center offset ≤ ${n(limits.center_offset_px)} px · footprint overlap ≥ ${n(limits.footprint_overlap)}`;
+}
+
+function successorPanel(payload) {
+  const list=payload?.successors || [];
+  if (!list.length) return "";
+  return `<h3>Feeds later runs</h3>
+    ${list.map(next=>`<p class="soft">This run continues into the ${e(next.photo_role)} run of ${e(date(next.created_at))}: ${next.continued} of ${next.earlier_total} earlier spots continued there.</p>
+    <div class="actions">${btn("Open the later run","open-successor","secondary","arrow",`data-id="${e(next.id)}"`)}</div>`).join("")}`;
+}
+
+function continuationPanel(record, payload, currentRevision) {
+  if (!payload) return `<h3>Continuation from an earlier run</h3><p class="plot-note">Loading saved continuation…</p>`;
+  const back=payload.back_to ? `<div class="actions">${btn("Back to the later run","close-earlier","tiny secondary","back")}</div>` : "";
+  const continuation=payload.continuation;
+  if (!continuation) {
+    const options=payload.earlier_options || [];
+    if (!options.length) return `<h3>Continuation from an earlier run</h3>${back}
+      <p class="soft">Run Surface observations on a second registered photograph of this specimen, review its spots, then return here.</p>`;
+    return `<h3>Continuation from an earlier run</h3>${back}
+      <p class="soft">Carry reviewed spots from an earlier run on another photograph of this specimen. A pair qualifies only where both runs photograph it and it meets the limits you enter.</p>
+      <div class="actions">${btn("Continue from earlier run","continuation-start","primary","compare")}</div>`;
+  }
+  const summary=continuation.summary;
+  const earlier=payload.earlier_measurement;
+  const warning=payload.warning?`<p class="notice warn">${e(payload.warning)}</p>`:"";
+  const rows=continuation.archive.earlier;
+  const optionsByEarlier=new Map();
+  for (const pair of payload.candidate_pairs || []) {
+    if (!optionsByEarlier.has(pair.earlier)) optionsByEarlier.set(pair.earlier, []);
+    optionsByEarlier.get(pair.earlier).push(pair);
+  }
+  const changes=(continuation.history || []).filter(entry=>entry.action!=="resuggested");
+  const portrait=earlier?`<figure class="stage">${img(earlier.photo.overlay_url,`Earlier run ${e(earlier.photo.role)}`)}</figure>
+    <p class="plot-note">Opened from the earlier run: ${e(earlier.photo.role)} · ${e(earlier.photo.name)} · ${e(date(earlier.created_at))}.</p>`:"";
+  return `<h3>Continuation from an earlier run</h3>${warning}${back}
+    <div class="metrics">${stat("Continued",`${summary.continued} of ${summary.earlier_total}`)}${stat("Not photographed",summary.earlier_not_photographed)}${stat("No qualifying spot",summary.earlier_no_qualifying_continuation)}${stat("Confirmed kept",summary.confirmed_continued)}${stat("Confirmed archived",summary.confirmed_archived)}</div>
+    <p class="plot-note">Earlier run: ${e(continuation.earlier_photo.role)} · ${e(continuation.earlier_photo.name)} · ${e(date(continuation.earlier_created_at))}. Limits: ${e(limitText(continuation.limits))}.</p>
+    <p class="plot-note">${e(continuation.rules.ranking)} ${e(continuation.rules.capture)}</p>
+    <div class="actions">${btn("Open earlier run","open-earlier","tiny secondary","book")}
+      ${link("Earlier overlay","/api/results/"+e(continuation.earlier_id)+"/image/overlay","tiny ghost","download")}
+      ${btn("Rebuild automatic relation","continuation-start","tiny ghost","compare")}</div>
+    <div class="divider-list scroll-list">${rows.map(row=>{
+      const choices=optionsByEarlier.get(row.key) || [];
+      const canChange=row.outcome!=="not_photographed" && (choices.length || row.outcome==="continued");
+      const aside=row.set_aside?" · kept out by hand":"";
+      const detail=row.outcome==="continued"
+        ? `continues ${row.later_key} · earlier ${e(row.previous_decision)} · offset ${n(row.center_offset_px)} px · footprint ${n(row.footprint_overlap,3)}`
+        : `${e(row.outcome_label)}${aside} · earlier ${e(row.previous_decision)}${row.previous_notes?` · ${e(row.previous_notes)}`:""}`;
+      return `<div class="row"><div class="grow"><strong>${e(row.key)}</strong><br><small>${e(detail)}</small></div>
+        ${canChange?btn(row.outcome==="continued"?"Change":"Attach","continuation-link","tiny ghost",null,`data-earlier="${e(row.key)}"`):""}</div>`;
+    }).join("")}</div>
+    ${portrait}
+    ${changes.length?`<details><summary>Change history (${changes.length})</summary>${table(["When","Action","Earlier","From","To","Reason"],changes.map(entry=>[date(entry.changed_at),entry.action,entry.earlier||"—",entry.from||"—",entry.to||"—",entry.reason||"—"]))}</details>`:""}`;
+}
+
 
 function textureDetail(m) {
   return `<h3>Texture repeats by direction</h3>
@@ -135,7 +197,7 @@ function referenceDetail(m) {
     <p class="notice">${e(m.capture_note)}</p>`;
 }
 
-function details(record) {
+function details(record, payload) {
   const render = {
     weave:m=>`<h3>Visible texture families</h3><p class="plot-note">${e(m.note)}</p>${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak / background"],m.rows.map(item=>[item.family,n(item.angle_degrees,2),n(item.pitch,3),n(item.peak_to_background,2)]))}`,
     pores:m=>`<h3>Opening record</h3><p class="plot-note">${e(m.note)} ${m.features_omitted?`Table retains the largest ${m.rows.length} openings.`:""}</p>
@@ -146,24 +208,26 @@ function details(record) {
     dots:m=>`<h3>Isolated dark grains</h3><p class="plot-note">${e(m.note)}</p>${table(["Grain","Area (px²)","Area (mm²)","Major/minor","Angle (°)"],m.rows.map(r=>[
       r.dot, n(r.area_px,0), n(r.area_mm2,5), n(r.axis_ratio,2), n(r.major_angle_deg,1)
     ]))}`,
-    color:colorDetail,coverage:coverageDetail,defects:defectsDetail,glare:glareDetail,
+    color:colorDetail,coverage:coverageDetail,defects:record=>defectsDetail(record,payload),glare:glareDetail,
     direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
     marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,scribe:scribeDetail,
   }[record.kind];
   return render(record.kind==="defects" ? record : record.metrics);
 }
 
-export function resultCard(record, layer, currentRevision) {
+export function resultCard(record, layer, currentRevision, payload) {
   const path=`/api/results/${record.id}`;
   const available = ["overlay","source",...(record.pictures.paired ? ["paired"] : []),...(record.metrics.reference_image ? ["reference"] : [])];
   const old = record.source_version !== currentRevision;
+  const continuation = record.kind==="defects" ? continuationPanel(record, payload)+successorPanel(payload) : "";
   return `<section class="card stack">
     <div class="title-row"><div><h3>${e(record.label)}</h3><small>Specimen revision ${record.source_version} · ${e(date(record.created_at))}</small></div>${old ? badge("Earlier specimen revision","caution") : badge("Saved measurement","ready")}</div>
     <div class="actions">${available.map(key=>btn(layers[key],"result-layer",layer===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
     <figure class="stage">${img(path+"/image/"+layer+"?v="+record.version,`${record.label} · ${layers[layer]}`)}</figure>
     ${layer==="overlay"?legend(record):""}
     ${metricSet(record)}
-    <section>${details(record)}</section>
+    <section>${details(record,payload)}</section>
+    ${continuation}
     <details><summary>Measurement source</summary>${table(["Property","Value"],[
       ["Image",record.provenance.photo.display_name],["Image role",record.provenance.photo.role],["Region",record.provenance.region?.name || "Entire plane"],
       ["Photo digest",record.provenance.photo.original_digest],
@@ -171,11 +235,11 @@ export function resultCard(record, layer, currentRevision) {
       ["Clipped pixels",record.support.clipped_pixels],
       ["Neutral correction",record.provenance.neutral_card?.before_swatch || "Uncorrected"],
     ])}</details>
-    <div class="actions">${link("Metrics CSV",path+"/metrics.csv","secondary","download")}${btn("Pin evidence","pin", "primary","archive")}</div>
+    <div class="actions">${link("Metrics CSV",path+"/metrics.csv","secondary","download")}${record.continuation?link("Continuation CSV",path+"/continuation.csv","secondary","download"):""}${btn("Pin evidence","pin", "primary","archive")}</div>
   </section>`;
 }
 
 export function specimenResultRows(items) {
   if (!items.length) return "<p class='soft'>Run a measurement to start this specimen’s history.</p>";
-  return `<div class="divider-list scroll-list">${items.map(item=>`<div class="row"><div class="grow"><strong>${e(item.label)}</strong><br><small>Revision ${item.source_version} · ${e(date(item.created_at))}</small></div>${btn("Open","result-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")}</div>`;
+  return `<div class="divider-list scroll-list">${items.map(item=>`<div class="row"><div class="grow"><strong>${e(item.label)}</strong><br><small>Revision ${item.source_version} · ${e(date(item.created_at))}${item.continuation?` · continues ${item.continuation.continued} of ${item.continuation.earlier_total} ${e(item.continuation.earlier_photo_role)} spots`:""}</small></div>${btn("Open","result-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")}</div>`;
 }

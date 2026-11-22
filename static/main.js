@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,continuation:null,continuationBack:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -155,7 +155,8 @@ function measureControls() {
 }
 
 function measurements() {
-  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
+  const payload=state.continuation?{...state.continuation,back_to:state.continuationBack}:state.continuation;
+  return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version,payload):empty("Run a measurement to view its map and results.")}</div>
     <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
 }
 
@@ -270,7 +271,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.continuation=null;state.continuationBack=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -641,11 +642,86 @@ async function runMeasurement(data) {
     options:parsedOptions(data,state.config.tools[state.tool]),
   }});
   if (revision!==travel) return;
-  state.result=result;
+  await openResult(result.id);
   state.layer="overlay";
   await gatherTile();
   toast("Measurement saved.");
   render();
+}
+
+async function openResult(id) {
+  const record=await api("/api/results/"+id);
+  state.result=record;
+  state.continuation=record.kind==="defects"?(await api(`/api/results/${id}/continuation`)):null;
+}
+
+function openEarlierRun() {
+  const earlierId=state.continuation?.continuation?.earlier_id;
+  if (!earlierId) throw Error("This run has no earlier continuation to open.");
+  state.continuationBack=state.result.id;
+  return openResult(earlierId);
+}
+
+function continuationForm(view) {
+  const options=view.earlier_options || [];
+  const current=view.continuation;
+  if (current) {
+    const fixed=option(current.earlier_id,`${date(current.earlier_created_at)} · ${current.earlier_photo.role} · earlier run`,current.earlier_id);
+    return modal("Rebuild the automatic relation",`
+      ${selectField("Earlier run","earlier_id",fixed)}
+      <div class="form-columns">${numField("Center-offset limit (px)","center_offset_px",current.limits.center_offset_px,0.01,100000,"any")}
+      ${numField("Footprint-overlap limit","footprint_overlap",current.limits.footprint_overlap,0,1,"any")}</div>
+      <p class="notice">This replaces the saved relation with a fresh automatic one. Earlier and later reviews stay untouched, and manual moves are kept in the change history.</p>`,
+      "Rebuild relation",async data=>{
+        const body=parseDatesAndNumbers(data,["center_offset_px","footprint_overlap"]);
+        state.result=await api(`/api/results/${state.result.id}/continuation`,{method:"POST",body:{...body,version:state.result.version,resuggest:true}});
+        state.continuation=await api(`/api/results/${state.result.id}/continuation`);
+        commitModal();
+        toast("Automatic continuation rebuilt.");
+        render();
+      });
+  }
+  if (!options.length) throw Error("Run Surface observations on another registered photograph of this specimen first.");
+  const choices=options.map(item=>option(item.id,`${item.photo_role} · ${date(item.created_at)} · ${item.observation_count} spots · ${item.confirmed_count} confirmed`,options[0].id)).join("");
+  modal("Continue from an earlier run",`
+    ${selectField("Earlier run","earlier_id",choices)}
+    <div class="form-columns">${numField("Center-offset limit (px)","center_offset_px",25,0.01,100000,"any")}
+    ${numField("Footprint-overlap limit","footprint_overlap",0.25,0,1,"any")}</div>
+    <p class="notice">Only spots photographed in both runs and within both limits can continue. Pairs are kept one-to-one: as many as possible, then as many confirmed earlier spots as possible, then the closest footprints and centers. Spots that do not continue stay in the archive as not photographed or not qualifying; none is recorded as removed.</p>`,
+    "Suggest continuations",async data=>{
+      const body=parseDatesAndNumbers(data,["center_offset_px","footprint_overlap"]);
+      state.result=await api(`/api/results/${state.result.id}/continuation`,{method:"POST",body:{...body,version:state.result.version}});
+      state.continuation=await api(`/api/results/${state.result.id}/continuation`);
+      commitModal();
+      toast(`${state.continuation.continuation.summary.continued} continuations saved.`);
+      render();
+    });
+}
+
+function continuationLinkForm(view, earlierKey) {
+  const continuation=view.continuation;
+  const row=continuation.archive.earlier.find(item=>item.key===earlierKey);
+  if (!row) throw Error("That earlier spot is not in this continuation.");
+  if (row.outcome==="not_photographed") throw Error("The later view does not photograph this spot, so it cannot continue.");
+  const choices=(view.candidate_pairs || []).filter(item=>item.earlier===earlierKey);
+  if (!choices.length) throw Error("No later spot meets the saved limits for this earlier spot.");
+  const current=continuation.links.find(item=>item.earlier===earlierKey)?.later;
+  const listed=choices.map(item=>option(item.later,`${item.later} · offset ${n(item.center_offset_px)} px · footprint ${n(item.footprint_overlap,3)} · earlier ${item.previous_decision}`,current||choices[0].later)).join("");
+  modal(`Continue earlier spot ${earlierKey}`,`
+    <p class="notice">Earlier decision: ${e(row.previous_decision)}${row.previous_notes?` · ${e(row.previous_notes)}`:""}.</p>
+    ${selectField("This later spot","later",option("","No continuation",current||"")+listed)}
+    ${areaField("Reason for the change","reason","",240)}
+    <p class="soft">Saving moves only ${e(earlierKey)}. Its earlier review and this run's reviews are kept. Other continuations stay as they are; any spot left without a partner is refilled only from pairs that are free.</p>`,
+    "Save continuation",async data=>{
+      const later=data.get("later")||null;
+      const body={version:state.result.version,reason:data.get("reason")};
+      if (later) body.later=later;
+      state.result=await api(`/api/results/${state.result.id}/continuation/links/${earlierKey}`,{method:"PUT",body});
+      state.continuation=await api(`/api/results/${state.result.id}/continuation`);
+      commitModal();
+      toast(later?`Earlier spot ${earlierKey} now continues ${later}.`:`Earlier spot ${earlierKey} no longer continues a later spot.`);
+      render();
+    },false);
 }
 
 async function doAction(name,target) {
@@ -719,16 +795,41 @@ async function doAction(name,target) {
     "defect-note":()=>{
       const record=state.result;
       const old=record.decisions[marker]||{};
-      modal("Review "+marker, selectField("Disposition","decision",["review","confirm","dismiss"].map(item=>option(item,item,old.decision||"review")).join(""))+
+      const continuation=state.continuation?.continuation;
+      const carried=(continuation?.archive.earlier || []).find(item=>item.later_key===marker);
+      const earlierInfo=state.continuation?.earlier_measurement;
+      const earlier=carried?`<p class="notice">This spot continues earlier ${e(carried.key)} (${e(carried.previous_decision)}${carried.previous_notes?` · ${e(carried.previous_notes)}`:""}; reviewed ${e(date(carried.previous_reviewed_at))}). Earlier run: ${e(earlierInfo?.photo.name || "—")} · ${e(date(earlierInfo?.created_at))}.</p>
+        <figure class="stage">${img(`/api/results/${continuation.earlier_id}/observations/${carried.key}/image`, `Earlier observation ${carried.key}`)}</figure>
+        <p class="soft">Offset ${n(carried.center_offset_px)} px · footprint overlap ${n(carried.footprint_overlap,3)} at the saved limits.</p>
+        <div class="actions">${link("Open earlier map","/api/results/"+continuation.earlier_id+"/image/overlay","tiny secondary","book")}${btn("Open earlier run","open-earlier","tiny ghost","book")}</div>`:"";
+      modal("Review "+marker, earlier+selectField("Disposition","decision",["review","confirm","dismiss"].map(item=>option(item,item,old.decision||"review")).join(""))+
         areaField("Observation note","notes",old.notes,240),"Save observation",async data=>{
         state.result=await api(`/api/results/${record.id}/observations/${marker}`,{method:"PUT",body:{version:record.version,...plainData(data)}});
+        state.continuation=state.result.kind==="defects"?(await api(`/api/results/${record.id}/continuation`)):null;
         commitModal();
         toast("Observation reviewed.");
         render();
       });
     },
+    "continuation-start":()=>continuationForm(state.continuation),
+    "continuation-link":()=>continuationLinkForm(state.continuation,target.dataset.earlier),
+    "open-earlier":async ()=>{
+      await openEarlierRun();
+      render();
+    },
+    "open-successor":async ()=>{
+      state.continuationBack=null;
+      await openResult(id);
+      render();
+    },
+    "close-earlier":async ()=>{
+      const back=state.continuationBack;
+      state.continuationBack=null;
+      if (back) await openResult(back);
+      render();
+    },
     "result-open":async ()=>{
-      state.result=await api("/api/results/"+id);
+      await openResult(id);
       state.layer="overlay";
       state.tab="measure";
       render();
@@ -736,6 +837,7 @@ async function doAction(name,target) {
     "result-layer":()=>{state.layer=value;render();},
     "defect-choice":async ()=>{
       state.result=await api(`/api/results/${state.result.id}/observations/${marker}`,{method:"PUT",body:{version:state.result.version,decision:value,notes:""}});
+      state.continuation=state.result.kind==="defects"?(await api(`/api/results/${state.result.id}/continuation`)):null;
       toast("Observation reviewed.");
       render();
     },

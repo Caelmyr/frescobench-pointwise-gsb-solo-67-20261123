@@ -1,10 +1,10 @@
 import math
 
 import numpy as np
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 from .art import ACCENT, INK, SHADOW, font, load_artifact_picture, stored_preview
-from .model import InputError, collection, dictionary, enumeration, string
+from .model import InputError, MissingError, collection, dictionary, enumeration, string
 
 
 REVIEW_COLOR = {"confirm": (162, 225, 171), "review": ACCENT, "dismiss": (159, 162, 154)}
@@ -165,3 +165,49 @@ def review_selection(record, mode, query):
     all_markers = marker_meta(record, record["decisions"])
     markers = candidate_filter(all_markers, mode, query)
     return {**observation_balance(all_markers), "items": markers, "filtered_count": len(markers)}
+
+
+def observation_picture(store, record, key, zoom=5):
+    """A close view of one observation as it was reviewed, with its decision."""
+    if record["kind"] != "defects":
+        raise InputError("This measurement has no spot observations.")
+    marker = next(
+        (item for item in marker_meta(record, record["decisions"]) if item["key"] == key), None
+    )
+    if marker is None:
+        raise MissingError("That observation is not in this run.")
+    image = load_artifact_picture(store.blobs, record["pictures"]["source"])
+    width, height = image.size
+    left, top, right, bottom = marker_position(marker["bounds"], image.size, 6)
+    left = max(0, left - (right - left))
+    top = max(0, top - (bottom - top))
+    right = min(width, right + (right - left))
+    bottom = min(height, bottom + (bottom - top))
+    if right - left < 24 or bottom - top < 24:
+        raise MissingError("The observation is too small to open on its own.")
+    detail = image.crop((left, top, right, bottom))
+    scale = min(8, max(2, zoom, int(240 / max(1, min(detail.size)))))
+    detail = detail.resize((detail.width * scale, detail.height * scale), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(detail)
+    x, y = marker["normalized_center"]
+    center = (round(x * width) - left, round(y * height) - top)
+    bbox = marker_position(marker["bounds"], image.size, 0)
+    radius = max(10, round(block_radius(width, height, bbox) * scale))
+    center = (center[0] * scale, center[1] * scale)
+    line = max(2, round(min(detail.size) / 180))
+    tone = REVIEW_COLOR[marker["decision"]]
+    draw.ellipse(
+        (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius),
+        outline=SHADOW, width=line + 2,
+    )
+    draw.ellipse(
+        (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius),
+        outline=tone, width=line,
+    )
+    typeface = font(max(14, min(28, round(min(detail.size) / 22))))
+    heading = f"{marker['key']} · {marker['decision']}"
+    draw.text((8, 6), heading, font=typeface, fill=tone, stroke_width=3, stroke_fill=SHADOW)
+    if marker["notes"]:
+        note_font = font(max(11, min(18, round(min(detail.size) / 32))))
+        draw.text((8, 8 + typeface.size + 4), marker["notes"][:70], font=note_font, fill=INK, stroke_width=2, stroke_fill=SHADOW)
+    return detail

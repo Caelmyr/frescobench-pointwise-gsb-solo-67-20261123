@@ -51,10 +51,25 @@ def result_metrics_table(record):
         )
         rows = []
         decisions = record.get("decisions", {})
+        continuation = record.get("continuation")
+        later_rows = {}
+        if continuation:
+            later_rows = {row["later_key"]: row for row in continuation["archive"]["earlier"] if row["later_key"]}
         for marker in metrics["observations"]:
             decision = decisions.get(marker["key"], {})
             row = [marker[key] for key in columns[:-2]]
-            rows.append([*row, decision.get("decision", ""), decision.get("notes", "")])
+            carried = later_rows.get(marker["key"])
+            rows.append([
+                *row,
+                decision.get("decision", ""),
+                decision.get("notes", ""),
+                carried["key"] if carried else "",
+                carried["previous_decision"] if carried else "",
+                carried["previous_notes"] if carried else "",
+                carried["center_offset_px"] if carried else "",
+                carried["footprint_overlap"] if carried else "",
+            ])
+        columns = (*columns, "earlier_key", "earlier_decision", "earlier_notes", "center_offset_px", "footprint_overlap")
     elif kind == "coverage":
         columns = ("relative_top", "relative_bottom", "measured", "bare_percent", "mixed_percent", "glazed_percent",
                    "unmeasured_percent")
@@ -124,6 +139,31 @@ def result_metrics_table(record):
     else:
         columns = ("metric", "value")
         rows = [[key, val] for key, val in metrics.items() if not isinstance(val, (dict, list))]
+    return csv_lines(columns, rows)
+
+
+def continuation_table(record):
+    """The continuation archive as CSV: every earlier spot and its outcome."""
+    continuation = record.get("continuation")
+    if not continuation:
+        return None
+    earlier = {row["key"]: row for row in continuation["archive"]["earlier"]}
+    columns = (
+        "earlier_key", "type", "center", "earlier_decision", "earlier_notes", "earlier_reviewed_at", "outcome",
+        "later_key", "center_offset_px", "footprint_overlap", "set_aside",
+        "later_decision", "later_notes", "later_reviewed_at",
+    )
+    later = {row["key"]: row for row in continuation["archive"]["later"]}
+    rows = []
+    for key, row in earlier.items():
+        linked = later.get(row["later_key"]) if row["later_key"] else None
+        rows.append([
+            key, row["type"], row["center"], row["previous_decision"], row["previous_notes"],
+            row["previous_reviewed_at"], row["outcome_label"], row["later_key"], row["center_offset_px"],
+            row["footprint_overlap"], row["set_aside"],
+            linked["this_decision"] if linked else "", linked["this_notes"] if linked else "",
+            linked["this_reviewed_at"] if linked else "",
+        ])
     return csv_lines(columns, rows)
 
 
@@ -224,6 +264,22 @@ def measurement_article(record, sheet):
     title = escape(record["label"])
     location = escape(capture["display_name"])
     rev = record["source_version"]
+    continuation = record.get("continuation")
+    if continuation:
+        summary = continuation["summary"]
+        rows.append(
+            f"<tr><th>continued earlier spots</th><td>{summary['continued']} of {summary['earlier_total']}</td></tr>"
+        )
+        rows.append(
+            f"<tr><th>not photographed in the other view</th><td>{summary['earlier_not_photographed']}</td></tr>"
+        )
+        rows.append(
+            f"<tr><th>no qualifying continuation</th><td>{summary['earlier_no_qualifying_continuation']}</td></tr>"
+        )
+        rows.append(
+            f"<tr><th>earlier run</th><td>{escape(continuation['earlier_photo']['role'])} · "
+            f"{escape(continuation['earlier_photo']['name'])} · {escape(continuation['earlier_created_at'])}</td></tr>"
+        )
     summaries = "".join(rows)
     figures = ""
     if sheet:
@@ -285,6 +341,9 @@ def evidence_zip(store, entry):
             name = result_entry_names(record)
             zipfile.writestr(f"measurements/{name}.json", artifact_json(record))
             zipfile.writestr(f"measurements/{name}.csv", result_metrics_table(record))
+            archive = continuation_table(record)
+            if archive is not None:
+                zipfile.writestr(f"measurements/{name}-continuation.csv", archive)
             for view, digest in record["pictures"].items():
                 if digest:
                     zipfile.writestr(exported_image_name(record, view), store.blobs.get(digest))
@@ -324,6 +383,16 @@ def summarize_result(record):
     summary["tile_name"] = record["provenance"]["specimen"]["name"]
     summary["brief"] = {key: record["metrics"][key] for key in metrics}
     summary["overlay_url"] = f"/api/results/{record['id']}/image/overlay"
+    continuation = record.get("continuation")
+    if continuation:
+        summary["continuation"] = {
+            "earlier_id": continuation["earlier_id"],
+            "earlier_photo_role": continuation["earlier_photo"]["role"],
+            "continued": continuation["summary"]["continued"],
+            "earlier_total": continuation["summary"]["earlier_total"],
+            "not_photographed": continuation["summary"]["earlier_not_photographed"],
+            "no_qualifying_continuation": continuation["summary"]["earlier_no_qualifying_continuation"],
+        }
     return summary
 
 

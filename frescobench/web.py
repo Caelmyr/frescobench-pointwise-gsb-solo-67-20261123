@@ -7,9 +7,11 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .continuity import change_link, save as save_continuation, view as continuation_view
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
+    continuation_table,
     create_evidence,
     evidence_zip,
     filename_stem,
@@ -43,7 +45,7 @@ from .model import (
 from .parameters import TOOLS
 from .quality import quality_manifest
 from .photos import png_bytes
-from .review import parse_reviews, review_selection, save_reviews
+from .review import observation_picture, parse_reviews, review_selection, save_reviews
 from .store import Store
 from .study import create_study, public_metrics
 from .workspace import (
@@ -262,6 +264,15 @@ def register_measurements(api, store, heavy):
         name = filename_stem(data["label"], "measurement")
         return binary_response(result_metrics_table(data), "text/csv", name + ".csv")
 
+    @api.get("/results/<measurement_id>/continuation.csv")
+    def measurement_continuation_csv(measurement_id):
+        data = store.result(measurement_id)
+        table = continuation_table(data)
+        if table is None:
+            raise MissingError("This run has no saved continuation.")
+        name = filename_stem(data["label"], "measurement")
+        return binary_response(table, "text/csv", name + "-continuation.csv")
+
     @api.put("/results/<measurement_id>/observations/<entry>")
     def defect_decision(measurement_id, entry):
         data = json_request()
@@ -277,12 +288,37 @@ def register_measurements(api, store, heavy):
         phrase = string(request.args.get("query"), "Observation filter", maximum=100, required=False)
         return jsonify(review_selection(store.result(measurement_id), mode, phrase))
 
+    @api.get("/results/<measurement_id>/observations/<entry>/image")
+    def defect_observation_image(measurement_id, entry):
+        record = store.result(measurement_id)
+        key = string(entry, "Observation ID", maximum=8)
+        return image_response(observation_picture(store, record, key))
+
     @api.patch("/results/<measurement_id>/observations")
     def defect_review_many(measurement_id):
         data = json_request()
         choices = parse_reviews(data)
         with heavy:
             record = save_reviews(store, measurement_id, model_version(data), choices)
+        return jsonify(record)
+
+    @api.get("/results/<measurement_id>/continuation")
+    def continuation_show(measurement_id):
+        return jsonify(continuation_view(store, store.result(measurement_id)))
+
+    @api.post("/results/<measurement_id>/continuation")
+    def continuation_start(measurement_id):
+        with heavy:
+            record = save_continuation(store, store.result(measurement_id), json_request())
+        return jsonify(record), 201
+
+    @api.put("/results/<measurement_id>/continuation/links/<earlier_key>")
+    def continuation_link(measurement_id, earlier_key):
+        data = json_request()
+        with heavy:
+            record = change_link(store, store.result(measurement_id), {
+                **data, "earlier": earlier_key, "version": model_version(data),
+            })
         return jsonify(record)
 
     @api.get("/library")
