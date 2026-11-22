@@ -37,6 +37,11 @@ REGION_PURPOSES = {
     "glazed": "Intact pigment reference sample",
     "neutral": "Neutral color card",
     "ignore": "Exclude from measurement",
+    "pad_a": "Foot pad candidate · side A",
+    "pad_b": "Foot pad candidate · side B",
+    "bearing": "Supportable bare plaster",
+    "visible": "Painted area to keep visible",
+    "nopressure": "No-pressure zone",
 }
 ANALYSIS_LABELS = {
     "pores": "Plaster pore candidates",

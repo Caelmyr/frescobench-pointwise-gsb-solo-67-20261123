@@ -26,6 +26,7 @@ from .model import (
     tile_fields,
 )
 from .photos import diagnostic_flags, store_capture
+from .mounting import plan_status
 from .store import make_id
 
 
@@ -56,6 +57,8 @@ def summarize_tile(tile):
         "region_count": len(tile["regions"]),
         "cover_url": f"/api/specimens/{tile['id']}/photos/{cover['id']}/thumbnail" if cover else None,
         "registered_count": int(bool(base)) + len(tile["registrations"]),
+        "mounting_state": "adopted" if tile.get("mounting") else "none",
+        "mounting_stale": bool(plan_status(tile) and plan_status(tile)["stale"]),
         "updated_at": tile["updated_at"],
     }
 
@@ -72,10 +75,12 @@ def present_tile(tile):
             data["registered_url"] = f"/api/specimens/{tile['id']}/viewer/{record['id']}?v={tile['version']}"
         photos.append(data)
     native = tile.get("plane")
+    mounting = tile.get("mounting")
     return {
         **tile,
         "photos": photos,
         "canvas_size": native["size"] if native else None,
+        "mounting": mounting,
     }
 
 
@@ -142,12 +147,15 @@ def remove_photo(store, tile_id, capture_id, payload):
     def change(tile):
         photo = match_slot(tile["photos"], capture_id, "photo")
         if tile["plane"] and tile["plane"]["photo_id"] == capture_id:
-            if (tile["registrations"] or tile["regions"]) and not reset:
-                raise ConflictError("Removing the base photo requires resetting its current sampling plane.")
+            if (tile["registrations"] or tile["regions"] or tile.get("mounting")) and not reset:
+                raise ConflictError(
+                    "Removing the base photo requires resetting its current sampling plane and adopted mounting pair."
+                )
             tile["plane"] = None
             tile["calibration"] = None
             tile["registrations"] = {}
             tile["regions"] = []
+            tile["mounting"] = None
         tile["registrations"].pop(capture_id, None)
         tile["photos"].remove(photo)
 
@@ -191,12 +199,16 @@ def save_plane(store, tile_id, payload):
         updated = {"photo_id": photo_id, "corners": corners, "size": list(size)}
         if tile["plane"] == updated:
             return
-        if (tile["registrations"] or tile["regions"]) and not reset:
-            raise ConflictError("Changing the specimen plane requires confirming reset of its live regions and registrations.")
+        if (tile["registrations"] or tile["regions"] or tile.get("mounting")) and not reset:
+            raise ConflictError(
+                "Changing the specimen plane requires confirming reset of its live regions, registrations "
+                "and adopted mounting pair."
+            )
         tile["plane"] = updated
         tile["registrations"].clear()
         tile["regions"].clear()
         tile["calibration"] = None
+        tile["mounting"] = None
 
     return store.edit_tile(tile_id, expected, change, "plane", "Saved the photographed tile plane")
 
@@ -223,6 +235,13 @@ def save_registration(store, identifier, photo_id, payload):
     return store.edit_tile(identifier, expected, change, "registration", "Registered a cross-light capture")
 
 
+def frozen_mounting_ids(tile):
+    plan = tile.get("mounting")
+    if not plan:
+        return set()
+    return {region["id"] for region in plan["regions"]}
+
+
 def save_region(store, identifier, payload, region_id=None):
     expected = model_version(payload)
     region = region_fields(payload)
@@ -239,6 +258,12 @@ def save_region(store, identifier, payload, region_id=None):
             tile["regions"].append(region)
         else:
             previous = match_slot(tile["regions"], chosen, "sampling region")
+            if chosen in frozen_mounting_ids(tile) and (
+                previous["vertices"] != region["vertices"] or previous["purpose"] != region["purpose"]
+            ):
+                raise ConflictError(
+                    "This region is part of the adopted mounting pair. Re-adopt the pair before changing it."
+                )
             index = tile["regions"].index(previous)
             tile["regions"][index] = region
         if tile["calibration"]:
@@ -255,6 +280,8 @@ def remove_region(store, identifier, region_id, payload):
 
     def change(tile):
         region = match_slot(tile["regions"], chosen, "sampling region")
+        if chosen in frozen_mounting_ids(tile):
+            raise ConflictError("This region is part of the adopted mounting pair. Re-adopt the pair before removing it.")
         tile["regions"].remove(region)
         if tile["calibration"] and (tile["calibration"]["region_id"] == chosen or region["purpose"] == "ignore"):
             tile["calibration"] = None

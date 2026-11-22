@@ -23,6 +23,7 @@ from .inspection import side_preview, viewing_pair
 from .art import base_rgba
 from .intake import MAX_ARCHIVE_BYTES, inspect_packet
 from .metrology import create_metrology
+from .mounting import adopt_mounting, plan_status, release_mounting, trace_footing
 from .model import (
     ANALYSIS_LABELS,
     MAX_UPLOAD,
@@ -412,9 +413,31 @@ def register_desks(api, store, heavy):
 
     @api.post("/specimens/<specimen_id>/metrology")
     def geometry_make(specimen_id):
+        data = json_request()
+        mode = enumeration(data.get("mode"), ("trace", "area", "footing"), "Geometry measurement")
         with heavy:
-            record = create_metrology(store, specimen_id, json_request())
+            if mode == "footing":
+                record = trace_footing(store, specimen_id, data)
+            else:
+                record = create_metrology(store, specimen_id, data)
         return jsonify(record), 201
+
+    @api.post("/specimens/<specimen_id>/mounting")
+    def mounting_adopt(specimen_id):
+        with heavy:
+            tile = adopt_mounting(store, specimen_id, json_request())
+        return jsonify({"tile": present_tile(tile), "mounting": tile["mounting"]}), 201
+
+    @api.delete("/specimens/<specimen_id>/mounting")
+    def mounting_release(specimen_id):
+        tile = release_mounting(store, specimen_id, json_request())
+        return jsonify({"tile": present_tile(tile), "mounting": None})
+
+    @api.get("/specimens/<specimen_id>/mounting")
+    def mounting_show(specimen_id):
+        tile = store.tile(specimen_id)
+        plan = tile.get("mounting")
+        return jsonify({"mounting": plan, "status": plan_status(tile)})
 
     @api.get("/metrology/<entry_id>/overlay.png")
     def geometry_artifact(entry_id):
@@ -425,6 +448,21 @@ def register_desks(api, store, heavy):
         record = store.metrology(entry_id)
         name = filename_stem(record["title"], "geometry")
         return binary_response(artifact_json(record), "application/json", name + ".json")
+
+    @api.get("/specimens/<specimen_id>/mounting/image")
+    def mounting_image(specimen_id):
+        tile = store.tile(specimen_id)
+        if not tile.get("mounting"):
+            raise MissingError("This specimen has no adopted mounting pair.")
+        return png_blob(store, tile["mounting"]["image"])
+
+    @api.get("/specimens/<specimen_id>/mounting/data.json")
+    def mounting_json(specimen_id):
+        tile = store.tile(specimen_id)
+        if not tile.get("mounting"):
+            raise MissingError("This specimen has no adopted mounting pair.")
+        name = filename_stem(f"{tile['name']} mounting", "mounting")
+        return binary_response(artifact_json(tile["mounting"]), "application/json", name + ".json")
 
 
 def register_training(api, store, heavy):

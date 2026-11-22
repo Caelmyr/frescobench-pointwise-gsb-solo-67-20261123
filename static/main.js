@@ -70,8 +70,10 @@ function sources(selects, selected, optional) {
   return (optional?option("",optional,selected):"")+selects.map(item=>option(item.id,item.role_label+" · "+item.name,selected)).join("");
 }
 
+const mountingPurposes=["pad_a","pad_b","bearing","visible","nopressure"];
+
 function regions(purpose,includeNone=true) {
-  const choices=state.tile.regions.filter(item=>purpose?item.purpose===purpose:item.purpose!=="ignore");
+  const choices=state.tile.regions.filter(item=>purpose?item.purpose===purpose:item.purpose!=="ignore"&&!mountingPurposes.includes(item.purpose));
   return (includeNone?option("","Entire plane",""):"")+choices.map(item=>option(item.id,item.name)).join("");
 }
 
@@ -115,12 +117,14 @@ function captures() {
 function regionPage() {
   const tile=state.tile;
   const current=tile.photos.find(item=>item.registration_state==="base");
-  const rows=tile.regions.map(item=>`<div class="row"><div class="grow"><strong class="row-title">${e(item.name)}</strong><small>${e(state.config.region_purposes[item.purpose])}</small></div>
+  const frozen=new Set((tile.mounting?.regions||[]).map(item=>item.id));
+  const rows=tile.regions.map(item=>`<div class="row"><div class="grow"><strong class="row-title">${e(item.name)}</strong><small>${e(state.config.region_purposes[item.purpose])}${frozen.has(item.id)?" · frozen in adopted pair":""}</small></div>
     ${btn("Edit","region-edit","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("");
+  const notice=tile.mounting?`<p class="notice">The adopted mounting pair freezes ${frozen.size} marked regions. Re-adopt or release the pair in Geometry before editing or removing them.</p>`:"";
   const gains=tile.calibration;
   return `<div class="grid-detail"><section class="card"><div class="title-row"><h3>Sampling plane</h3>${current?btn("Draw region","region-add","primary","plus"):""}</div>
      ${current?`<figure class="stage">${img(current.registered_url+"&layer=regions",`Marked regions on ${tile.name}`)}</figure><p class="stage-foot">Region positions are saved in the registered survey plane.</p>`:empty("Set a base photograph from Captures.")}</section>
-     <div class="stack"><section class="card"><h3>Saved regions</h3>${rows?`<div class="divider-list">${rows}</div>`:"<p class='soft'>Draw an inspection area, a coverage reference, or a patch to exclude.</p>"}</section>
+     <div class="stack"><section class="card"><h3>Saved regions</h3>${notice}${rows?`<div class="divider-list">${rows}</div>`:"<p class='soft'>Draw an inspection area, a coverage reference, or a patch to exclude.</p>"}</section>
      <section class="card"><h3>Neutral-card balance</h3>${gains?`<div class="metrics">${stat("Measured card",gains.before_swatch)}${stat("Balanced card",gains.after_swatch)}${stat("Unclipped card pixels",n(gains.card_samples,0))}</div>`:"<p class='soft'>Use an evenly lit neutral patch to balance this base capture.</p>"}
        <div class="actions">${btn("Balance neutral card","neutral","secondary","sample")}${gains?btn("Clear balance","neutral-clear","ghost"):""}</div>
      </section></div></div>`;
@@ -166,27 +170,52 @@ function evidencePage() {
     <section class="card"><h3>Specimen activity</h3><div class="divider-list scroll-list">${(state.activity||[]).map(row=>`<div class="row"><div class="grow"><strong>${e(row.message)}</strong><br><small>${e(date(row.recorded_at))}</small></div></div>`).join("")}</div></section></div>`;
 }
 
+function footingDetail(m) {
+  const t=m.totals;
+  const rows=m.runs.map((run,index)=>[index+1,run.label,`${n(run.from_distance)}–${n(run.to_distance)} ${run.unit}`,n(run.length)]);
+  return `<h3>Recognized bearing along this footing</h3>
+    <div class="metrics">${stat("Continuous length",`${n(t.continuous_length)} ${m.length_unit}`)}${stat("Interrupted length",`${n(t.interruption_length)} ${m.length_unit}`)}${stat("Pad A / Pad B",`${n(t.pad_a_length)} / ${n(t.pad_b_length)}`)}</div>
+    <p class="plot-note">${e(m.note)}</p>
+    ${table(["Run","Along-line condition",`Span (${m.length_unit})`,`Length (${m.length_unit})`],rows)}
+    <details><summary>Adopted plan and rule</summary>
+      <p class="soft">${e(m.rule.text)}</p>
+      ${table(["Pad","Minimum bearing",`Acknowledged bearing (${m.unit})`],["A","B"].map(side=>[side,n(m.minimums["bearing_"+side.toLowerCase()]),n(m.acknowledged[side].area)]))}
+    </details>`;
+}
+
 function geometryPage() {
   const record=state.metrologyActive;
   const results=state.metrology||[];
   const tile=state.tile;
-  let report=empty("Save a traced path or the area of an existing sampling region.");
+  const plan=tile.mounting;
+  let report=empty("Save a traced path, an actual footing line or the area of an existing sampling region.");
   if (record) {
     const metrics=record.shape;
     const base=`/api/metrology/${record.id}`;
     const stats=record.mode==="trace"
       ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
-      : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
-    const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+      : record.mode==="footing"
+        ? [["Line length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Continuous",`${n(metrics.totals.continuous_length)} ${metrics.length_unit}`],["Interrupted",`${n(metrics.totals.interruption_length)} ${metrics.length_unit}`]]
+        : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
+    const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments||[];
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
-      ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+      ${record.mode==="footing"?footingDetail(metrics):table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
       <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
   }
-  return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
+  const planCard = plan
+    ? `<section class="card stack"><div class="title-row"><h3>Adopted mounting pair</h3>${badge(plan.feasible_pairs===1?"Only feasible pair":`${plan.feasible_pairs} feasible pairs`,"ready")}</div>
+      <p class="soft">Chosen on ${e(date(plan.created_at))} · frozen to this plane.</p>
+      <div class="metrics">${["A","B"].map(side=>stat(`Pad ${side} bearing`, `${n(plan.acknowledged[side].area)} ${plan.unit}`)).join("")}${stat("Visible paint left",`${n(plan.visible.remaining_area)} ${plan.unit}`)}</div>
+      <figure class="stage">${img(`/api/specimens/${tile.id}/mounting/image?v=${tile.version}`,"Adopted pad pair with acknowledged bearing pieces")}</figure>
+      <p class="soft">${e(plan.rule.text)}</p>
+      <div class="actions">${btn("Trace actual footing","footing-add","primary","measure")}${link("Plan JSON",`/api/specimens/${tile.id}/mounting/data.json`,"secondary","download")}${btn("Re-adopt pair","mounting-adopt","secondary","check")}${btn("Release pair","mounting-release","ghost")}</div></section>`
+    : `<section class="card"><h3>Mounting pair</h3><p class="soft">Mark candidate pads on either side of the loss, the supportable bare plaster, the no-pressure zone and the painted area to keep visible in Sampling regions. Then adopt one pair.</p>
+      <div class="actions">${btn("Adopt a pad pair","mounting-adopt","primary","check")}${tile.regions.some(item=>item.purpose==="pad_a")?btn("Trace actual footing","footing-add","secondary","measure"):""}</div></section>`;
+  return `<div class="grid-detail">${report}<div class="stack">${planCard}<section class="card"><h3>Measure a visible shape</h3>
       <p class="soft">Trace along the image or measure visible support inside a saved sampling region.</p>
-      <div class="actions">${btn("Trace a path","trace-add","primary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
+      <div class="actions">${btn("Trace a path","trace-add","secondary","measure")}${btn("Measure region area","area-add","secondary","frame")}</div></section>
       <section class="card"><h3>Saved geometry</h3><div class="divider-list">${results.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(item.mode)} · revision ${item.specimen.version}</small></div>${btn("Open","metrology-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved outlines.</p>"}</div></section></div></div>`;
 }
 
@@ -435,10 +464,13 @@ function geometryForm(mode) {
 function regionForm(region) {
   const base=state.tile.photos.find(item=>item.registration_state==="base");
   if (!base) throw Error("Set a base capture before drawing a region.");
-  const choices=Object.entries(state.config.region_purposes).map(([key,label])=>option(key,label,region?.purpose||"inspection")).join("");
+  const mountingGroup=["pad_a","pad_b","bearing","visible","nopressure"];
+  const current=region?.purpose||"inspection";
+  const choices=Object.entries(state.config.region_purposes)
+    .map(([key,label])=>option(key,label,current)).join("");
   modal(region?"Edit sampling region":"Draw sampling region",`
     <div class="form-columns">${textField("Name","name",region?.name,'required maxlength="80"')}${selectField("Purpose","purpose",choices)}</div>
-    <p class="notice">Click around the area in order. Use at least three points and leave a little room at capture edges.</p>
+    <p class="notice">Click around the area in order. Use at least three points and leave a little room at capture edges.${mountingGroup.includes(current)?" Mounting regions stay frozen while a pair is adopted.":""}</p>
     ${drawing(base.registered_url,"Specimen plane for region drawing")}
     <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>`,
     "Save region",async data=>{
@@ -535,7 +567,65 @@ function geometryMeasurementForm(mode) {
   if (!area) prepareDrawing([],45);
 }
 
-function importEvidence() {
+function footingForm() {
+  const base=state.tile.photos.find(item=>item.registration_state==="base");
+  if (!base) throw Error("Set a base photo before tracing a footing line.");
+  if (!state.tile.mounting) throw Error("Adopt a mounting pair before tracing an actual footing line.");
+  modal("Trace the actual footing",textField("Trace title","title","Actual footing",'required maxlength="90"')+`
+    <p class="notice">Click the line where the pad actually rests. Continuous runs follow only the recognized bearing piece under each adopted pad; the gap between pads and any part of a pad outside its recognized bearing are reported as interruptions.</p>
+    ${drawing(base.registered_url,"Adopted mounting plane for the footing line")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>`,
+    "Save footing trace",async data=>{
+      if (drawPoints.length<2) throw Error("Mark at least two points along the footing.");
+      state.metrologyActive=await api(tileUrl()+"/metrology",{method:"POST",body:{title:data.get("title"),mode:"footing",points:drawPoints}});
+      await gatherTile();
+      commitModal();
+      toast("Footing trace saved.");
+      render();
+    },true);
+  prepareDrawing([],45);
+}
+
+function mountingForm() {
+  if (!state.tile.plane) throw Error("Set a base photo before adopting a mounting pair.");
+  const unit=state.tile.width_mm&&state.tile.height_mm?"mm²":"px²";
+  const marked=state.tile.regions.filter(item=>["pad_a","pad_b","bearing","visible","nopressure"].includes(item.purpose));
+  if (!marked.length) throw Error("Mark pad candidates, bearing, visible paint and no-pressure areas in Sampling regions first.");
+  const frozen=Boolean(state.tile.mounting);
+  modal(frozen?"Re-adopt the mounting pair":"Adopt one mounting pair",`
+    <p class="notice">Every side must offer at least one candidate outline. Pads must not overlap or touch a no-pressure zone. Each pad counts only its largest single connected, evidently visible bearing patch; separated patches are never added together.</p>
+    ${frozen?`<p class="notice">Re-adoption releases the current frozen pair. ${e(state.tile.mounting.rule.text)}</p>`:""}
+    <div class="form-columns">${numField(`Pad A minimum bearing (${unit})`,"min_bearing_a",100,0,1000000,1)}
+      ${numField(`Pad B minimum bearing (${unit})`,"min_bearing_b",100,0,1000000,1)}
+      ${numField(`Minimum visible paint left (${unit})`,"min_visible",100,0,1000000,1)}</div>
+    <p class="soft">Marked: ${marked.map(item=>e(item.name)).join(", ")}</p>`,
+    frozen?"Re-adopt pair":"Adopt pair",async data=>{
+      const result=await api(tileUrl()+"/mounting",{method:"POST",body:{
+        version:state.tile.version,
+        min_bearing_a:Number(data.get("min_bearing_a")),
+        min_bearing_b:Number(data.get("min_bearing_b")),
+        min_visible:Number(data.get("min_visible")),
+      }});
+      state.tile=result.tile;
+      await gatherTile();
+      commitModal();
+      toast(state.tile.mounting.feasible_pairs===1?"One feasible pair adopted.":"Least-paint feasible pair adopted.");
+      render();
+    },true);
+}
+
+function releaseMounting() {
+  modal("Release the adopted mounting pair?",'<p>Frozen pad regions become editable again. Saved footing traces keep the pair they recorded.</p>',"Release pair",async ()=>{
+    const result=await api(tileUrl()+"/mounting",{method:"DELETE",body:{version:state.tile.version}});
+    state.tile=result.tile;
+    await gatherTile();
+    commitModal();
+    toast("Mounting pair released.");
+    render();
+  });
+}
+
+
   modal("Verify evidence ZIP",field("Evidence ZIP","packet",'<input id="field-packet" name="packet" type="file" accept="application/zip,.zip" required>')+
     '<p class="soft">Select a FrescoBench inspection archive up to 24 MiB. The viewer checks the declared images against their embedded digests.</p>',
     "Verify archive",async data=>{
@@ -713,6 +803,9 @@ async function doAction(name,target) {
     "mark-profile":lineForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
+    "footing-add":footingForm,
+    "mounting-adopt":mountingForm,
+    "mounting-release":releaseMounting,
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
     "receive-add":importEvidence,
     "received-open":()=>{state.receivedActive=state.received.find(item=>item.id===id);render();},

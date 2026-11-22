@@ -196,6 +196,7 @@ class Store:
             "plane": fields.get("plane"),
             "registrations": fields.get("registrations", {}),
             "calibration": fields.get("calibration"),
+            "mounting": fields.get("mounting"),
             "synthetic": fields.get("synthetic", False),
         }
         conn.execute(
@@ -221,6 +222,20 @@ class Store:
                 (tile["version"], document(tile), tile["updated_at"], tile["id"]),
             )
             event(conn, tile["id"], action, message)
+            return tile
+
+    def save_mounting(self, identifier, expected_version, plan):
+        with self.transaction(write=True) as conn:
+            tile = self._tile(conn, identifier)
+            self.require_version(tile, expected_version)
+            tile["mounting"] = plan
+            tile["version"] += 1
+            tile["updated_at"] = timestamp()
+            conn.execute(
+                "UPDATE specimens SET version=?, document=?, updated_at=? WHERE id=?",
+                (tile["version"], document(tile), tile["updated_at"], tile["id"]),
+            )
+            event(conn, tile["id"], "mounting", f"Adopted mounting pair for {tile['name']}")
             return tile
 
     @staticmethod
