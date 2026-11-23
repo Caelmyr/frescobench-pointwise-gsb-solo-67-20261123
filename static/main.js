@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],cleaningStudies:[],query:""};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -155,8 +155,13 @@ function measureControls() {
 }
 
 function measurements() {
+  const studies=(state.cleaningStudies||[]).filter(item=>item.pairs?.some(pair=>pair.tile_id===state.tile.id));
+  const cleaningCard=studies.length?`<section class="card stack"><h3>Cleaning study re-check</h3>
+    <p class="soft">Re-measure bare plaster on a small box. Only positions inside the frozen study's common visible region are eligible.</p>
+    ${studies.map(item=>`<div class="row"><div class="grow"><strong>${e(item.title)}</strong><br><small>${item.pairs.length} pairs · ${n(item.common_area_mm2)} mm² common region</small></div>
+    ${btn("New re-check","cleaning-check","tiny secondary","measure",`data-id="${item.id}"`)}</div>`).join("")}</section>`:"";
   return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
-    <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
+    <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section>${cleaningCard}<section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
 }
 
 function evidencePage() {
@@ -229,6 +234,7 @@ function libraryPage() {
 function studyPanel() {
   const report=state.study;
   if (!report) return empty("Select specimens with saved measurements, then build a study.");
+  if (report.study_type==="cleaning") return cleaningStudyPanel(report);
   const base=`/api/studies/${report.id}`;
   return `<section class="card stack"><h3>${e(report.title)}</h3><p>${e(report.comparison_note)}</p>
     <div class="metrics">${report.groups.map(item=>stat(`${item.group} · n=${item.n}`,n(item.mean,4))).join("")}</div>
@@ -237,10 +243,26 @@ function studyPanel() {
     ${report.caveats.map(item=>`<p class="notice">${e(item)}</p>`).join("")}<div class="actions">${link("CSV",base+"/data.csv","secondary","download")}${link("Study JSON",base+"/data.json","secondary","download")}</div></section>`;
 }
 
+function cleaningStudyPanel(report) {
+  const base=`/api/studies/${report.id}`;
+  const stats=report.bare_change;
+  return `<section class="card stack">
+    <div class="title-row"><div><h3>${e(report.title)}</h3><small>Cleaning fragment study · ${report.pairs.length} pair${report.pairs.length===1?"":"s"} · ${n(report.common_area_mm2)} mm² common visible region</small></div>${badge("Frozen study","ready")}</div>
+    <p class="notice">${e(report.selection_rule)}</p>
+    <p class="soft">${e(report.frozen_note)}</p>
+    <div class="metrics">${stat("Mean bare change",percent(stats.mean_percent))}${stat("Smallest change",percent(stats.minimum_percent))}${stat("Largest change",percent(stats.maximum_percent))}${stat("Common pixels",n(report.common_pixels,0))}</div>
+    <figure class="stage">${img(base+"/common-mask.png","Strict common visible region used by every retained pair")}<figcaption class="stage-foot">One region seen by every selected before/after photo. Missing or clipped positions are excluded everywhere.</figcaption></figure>
+    ${report.pictures.map((_,index)=>img(base+`/sheet/${index+1}`,`Cleaning comparison sheet ${index+1}`)).join("")}
+    ${table(["Fragment","Bare before","Bare after","Change"],report.rows.map(item=>[item.tile_name,percent(item.before_bare_percent),percent(item.after_bare_percent),percent(item.bare_change_percent)]))}
+    ${report.excluded_specimens.length?`<details><summary>Specimens not eligible (${report.excluded_specimens.length})</summary>${table(["Specimen","Reason"],report.excluded_specimens.map(item=>[item.tile_name,item.reason]))}</details>`:""}
+    <div class="actions">${link("Study JSON",base+"/data.json","secondary","download")}</div></section>`;
+}
+
 function studyPage() {
-  return `<header class="page-head"><div><h1>Fragment studies</h1><p>Compare retained measurements by plaster, pigment, wall location or tray.</p></div>${btn("Build study","study-add","primary","plus")}</header>
+  return `<header class="page-head"><div><h1>Fragment studies</h1><p>Compare retained measurements, or build a before/after cleaning study on one strictly common visible region.</p></div>
+    <div class="actions">${btn("Build cleaning study","cleaning-add","primary","plus")}${btn("Build measurement study","study-add","secondary","plot")}</div></header>
     <div class="grid-detail">${studyPanel()}<section class="card"><h3>Saved studies</h3>
-      ${state.studies.map(item=>`<div class="row"><div class="grow"><strong>${e(item.title)}</strong><br><small>${e(item.metric_label)}</small></div>${btn("Open","study-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved studies.</p>"}</section></div>`;
+      ${state.studies.map(item=>`<div class="row"><div class="grow"><strong>${e(item.title)}</strong><br><small>${item.study_type==="cleaning"?`Cleaning · ${item.pairs?.length||0} pairs · ${n(item.common_area_mm2)} mm²`:e(item.metric_label)}</small></div>${btn("Open","study-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No saved studies.</p>"}</section></div>`;
 }
 
 function render() {
@@ -250,8 +272,8 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
-    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+  const [results,packets,activity,refs,metrology,studies]=await Promise.all([
+    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),api("/api/studies"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
@@ -259,6 +281,7 @@ async function gatherTile(token=travel) {
   state.activity=activity.items;
   state.metrology=metrology.items;
   state.refs=refs.items;
+  state.cleaningStudies=studies.items.filter(item=>item.study_type==="cleaning");
 }
 
 async function route() {
@@ -624,6 +647,73 @@ async function studyForm() {
   studyOptions(q("#field-study_kind",dialog).value);
 }
 
+async function cleaningStudyForm() {
+  const available=await api("/api/cleaning/candidates");
+  modal("Build cleaning study",`
+    <p class="notice">Every retained fragment pair is measured only where all selected before/after photos actually see the surface. A frame edge or an over-exposed spot in any one photo removes that position for the whole study.</p>
+    ${textField("Study title","title","Batch cleaning comparison",'required maxlength="100"')}
+    <div class="form-columns">${numField("Minimum fragment pairs","min_pairs",2,1,20,1)}
+    ${numField("Minimum common visible area (mm²)","min_common_area_mm2",0,0,1000000,1)}</div>
+    ${checkField("Apply saved neutral-card balance","apply_neutral",false)}
+    <h3>Eligible fragment pairs (${available.items.length})</h3>
+    <div class="divider-list scroll-list">${available.items.length?available.items.map(item=>`<div class="row"><div class="grow"><strong>${e(item.tile_name)}</strong><br><small>${n(item.width_mm)} × ${n(item.height_mm)} mm</small></div>
+      <select name="region:${item.tile_id}" aria-label="Inspection region for ${e(item.tile_name)}">${item.region_options.map(choice=>option(choice.region_id,choice.region_name)).join("")}</select></div>`).join(""):"<p class='soft'>No eligible pairs yet.</p>"}</div>
+    ${available.rejected.length?`<details><summary>Why other specimens are excluded (${available.rejected.length})</summary>${table(["Specimen","Reason"],available.rejected.map(item=>[item.tile_name,item.reason]))}</details>`:""}
+    <p class="soft">The rule first keeps as many pairs as possible, then maximizes the common visible area among those choices; ties resolve by specimen ID.</p>`,
+    "Save cleaning study",async data=>{
+      const region_ids={};
+      for (const [key,value] of data.entries()) {
+        if (key.startsWith("region:")) region_ids[key.slice(7)]=value;
+      }
+      const result=await api("/api/cleaning/studies",{method:"POST",body:{
+        title:data.get("title"),
+        min_pairs:Number(data.get("min_pairs")),
+        min_common_area_mm2:Number(data.get("min_common_area_mm2")),
+        apply_neutral:data.has("apply_neutral"),
+        region_ids,
+      }});
+      state.study=result;
+      state.studies=(await api("/api/studies")).items;
+      commitModal();
+      toast("Cleaning study frozen. Adopted pairs and common region will not change.");
+      render();
+    });
+}
+
+function cleaningCheckForm(studyId) {
+  const study=state.cleaningStudies.find(item=>item.id===studyId);
+  if (!study) throw Error("The cleaning study is no longer available.");
+  const entry=study.pairs.find(pair=>pair.tile_id===state.tile.id);
+  if (!entry) throw Error("This specimen is not part of that study.");
+  const beforePhoto=state.tile.photos.find(photo=>photo.id===entry.before_photo_id);
+  const regionChoices=state.tile.regions.filter(item=>item.purpose!=="ignore");
+  modal(`Re-check bare plaster · ${study.title}`,
+    `<p class="notice">The box is measured only where it intersects the frozen common visible region at positions the study's before/after photos actually observed.</p>
+    <div class="form-columns">${selectField("Area source","check_source",[["region","Saved region"],["draw","Draw a small box"]].map(([value,label])=>option(value,label,"region")).join(""))}
+    <select id="field-region_id" name="region_id" aria-label="Saved region">${regionChoices.map(item=>option(item.id,item.name)).join("")}</select></div>
+    <div id="check-draw" hidden><p class="soft">Click at least three points to close the small box.</p>
+    ${drawing(beforePhoto.registered_url,"Before-cleaning plane for the re-check box")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div></div>`,
+    "Run re-check",async data=>{
+      const source=data.get("check_source");
+      const body={study_id:studyId,apply_neutral:false};
+      if (source==="region") body.region_id=data.get("region_id");
+      else {
+        if (drawPoints.length<3) throw Error("Mark at least three points to close the box.");
+        body.vertices=drawPoints;
+      }
+      state.result=await api(tileUrl()+"/cleaning-checks",{method:"POST",body});
+      state.layer="overlay";
+      await gatherTile();
+      commitModal();
+      toast("Re-check saved against the frozen cleaning study.");
+      render();
+    },true);
+  prepareDrawing([],40);
+  const sourceField=q("#field-check_source");
+  sourceField.addEventListener("change",()=>{ q("#check-draw").hidden=sourceField.value!=="draw"; });
+}
+
 function parsedOptions(data,tool) {
   return Object.fromEntries(Object.entries(tool.fields).map(([key,config])=>{
     if (config.kind==="point") return [key,[Number(data.get(key+"-0")),Number(data.get(key+"-1"))]];
@@ -741,6 +831,8 @@ async function doAction(name,target) {
     },
     pin:pinForm,
     "study-add":studyForm,
+    "cleaning-add":cleaningStudyForm,
+    "cleaning-check":()=>cleaningCheckForm(id),
     "study-open":()=>{state.study=state.studies.find(item=>item.id===id);render();},
     close:commitModal,
   };

@@ -121,6 +121,13 @@ def result_metrics_table(record):
         fields = ("rank", "registered_pixels", "normalized_center", "contrast", "bounding_width", "bounding_height")
         columns = ("unit", *fields)
         rows = ([metrics["unit"], *(item[key] for key in fields)] for item in metrics["candidates"])
+    elif kind == "cleaning-check":
+        columns = ("stage", "bare_percent", "mixed_percent", "glazed_percent", "unmeasured_percent", "measured_pixels")
+        rows = (
+            [stage, *(metrics[stage]["percent"][key] for key in ("bare", "mixed", "glazed", "unmeasured")),
+             metrics[stage]["measured"]]
+            for stage in ("before", "after")
+        )
     else:
         columns = ("metric", "value")
         rows = [[key, val] for key, val in metrics.items() if not isinstance(val, (dict, list))]
@@ -317,6 +324,7 @@ def summarize_result(record):
         "joint": ("measured_stations", "unmeasured_stations", "median_absolute_step"),
         "scribe": ("axis_length", "maximum_width", "observed_stations"),
         "aggregate": ("candidate_clusters", "observed_pixels", "bright_fraction_of_support"),
+        "cleaning-check": ("study_title", "bare_change_percent", "eligible_percent_of_box"),
     }[record["kind"]]
     summary = {key: record[key] for key in (
         "id", "kind", "label", "tile_id", "source_version", "created_at", "version", "basis",

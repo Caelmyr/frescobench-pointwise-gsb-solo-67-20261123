@@ -11,7 +11,7 @@ from .store import make_id
 from .photos import store_capture
 
 
-DEMO_KEY = "frescobench.training.v1"
+DEMO_KEY = "frescobench.training.v2"
 PLANE_SIZE = (620, 472)
 PHOTO_SIZE = (766, 598)
 DEMO_ROLES = ("diffuse", "parallel", "cross", "rake-left", "rake-right")
@@ -21,6 +21,10 @@ POSES = {
     "cross": [[0.079, 0.101], [0.908, 0.119], [0.877, 0.916], [0.081, 0.909]],
     "rake-left": [[0.089, 0.094], [0.894, 0.088], [0.902, 0.905], [0.064, 0.911]],
     "rake-right": [[0.094, 0.095], [0.913, 0.094], [0.926, 0.906], [0.112, 0.893]],
+}
+CLEANING_POSES = {
+    "before": [[0.096, 0.090], [0.905, 0.108], [0.888, 0.905], [0.085, 0.895]],
+    "after": [[0.088, 0.084], [0.914, 0.115], [0.898, 0.918], [0.078, 0.884]],
 }
 
 
@@ -65,6 +69,8 @@ class ProofField:
     roughness: np.ndarray
     u: np.ndarray
     v: np.ndarray
+    fragment: np.ndarray
+    exposed: np.ndarray
 
 
 def surface_palette(colors, values):
@@ -183,7 +189,7 @@ def bake_field(specimen):
     neutral_card(diffuse, roughness, x, y)
     specular = np.where(fragment, .52 - .30 * exposed, .04)
     return ProofField(np.clip(diffuse, 0, 1), relief, specular,
-                      (tape | marks | scribe).astype(np.float32), roughness, x, y)
+                      (tape | marks | scribe).astype(np.float32), roughness, x, y, fragment, exposed)
 
 
 def gloss_reflection(field, role):
@@ -266,6 +272,36 @@ def render_photo(field, role, specimen):
     return Image.fromarray(array)
 
 
+def render_cleaning_photo(field, stage, specimen):
+    """Before/after cleaning views registered on the same millimetre plane."""
+    x, y = field.u, field.v
+    broad = 0.93 + 0.13 * (1 - y) - 0.08 * (x - 0.5) ** 2
+    base = field.diffuse.copy()
+    if stage == "before":
+        # A warm dust veil over the painted face shifts pigmented pixels
+        # toward the plaster anchor, inflating the measured bare fraction.
+        generator = np.random.default_rng(specimen.seed + 71)
+        mottle = random_field(generator, base.shape[:2], 33, 41)
+        veil = np.clip(0.10 + 0.06 * mottle + 0.03 * np.sin(11 * x + 7 * y), 0.03, 0.22)
+        veil *= field.fragment
+        grime = np.array([0.42, 0.35, 0.26], dtype=np.float32)
+        base = base * (1 - veil[..., None]) + grime * veil[..., None]
+    else:
+        # Cleaning re-coats the central portion of the exposed loss strip with
+        # pigmented plaster, leaving its margins and the reference controls.
+        generator = np.random.default_rng(specimen.seed + 103)
+        grain = generator.normal(size=base.shape[:2]).astype(np.float32)
+        restored_color = surface_palette(specimen.colors, 0.35 + 0.12 * grain)
+        central = (x > 0.30) & (x < 0.72) & (np.abs(y - 0.44) < 0.030)
+        repainted = field.exposed & central & field.fragment
+        brush = 0.85 + 0.10 * np.sin(210 * x + 48 * y)
+        base[repainted] = restored_color[repainted] * brush[repainted, None]
+    rgb = np.clip(base * broad[:, :, None], 0, 1)
+    image = warp_to_photo(rgb, CLEANING_POSES[stage], PHOTO_SIZE, specimen.seed)
+    array = np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(array)
+
+
 def rectangle(name, purpose, left, top, right, bottom):
     return {
         "id": make_id(), "name": name, "purpose": purpose,
@@ -287,6 +323,7 @@ def training_regions():
         rectangle("Neutral card", "neutral", 0.086, 0.858, 0.15, 0.943),
         rectangle("Image scale", "ignore", 0.478, 0.883, 0.663, 0.941),
         rectangle("Marked loss strip", "inspection", .223, .353, .812, .517),
+        rectangle("Cleaning study area", "inspection", .205, .205, .800, .760),
     ]
 
 
@@ -303,8 +340,29 @@ def training_specimen(store, specimen):
             synthetic=True,
         )
         photos.append(photo)
+    for stage in ("before", "after"):
+        image = render_cleaning_photo(field, stage, specimen)
+        photo = store_capture(
+            store.blobs, png_bytes(image), stage,
+            f"{specimen.name.lower().replace(' ', '-')}-{stage}-cleaning.png",
+            f"Synthetic {stage}-cleaning view aligned to the fragment's millimetre plane.",
+            make_id(),
+            synthetic=True,
+        )
+        photos.append(photo)
     base = photos[0]
     size = canvas_dimensions(base, POSES["diffuse"], 112, 84)
+    registrations = {
+        photo["id"]: {"base_photo_id": base["id"], "corners": POSES[photo["role"]], "support_percent": 100}
+        for photo in photos[1:] if photo["role"] in POSES
+    }
+    for photo in photos:
+        if photo["role"] in CLEANING_POSES:
+            registrations[photo["id"]] = {
+                "base_photo_id": base["id"],
+                "corners": CLEANING_POSES[photo["role"]],
+                "support_percent": 100,
+            }
     return {
         "name": specimen.name,
         "batch": specimen.batch,
@@ -318,10 +376,7 @@ def training_specimen(store, specimen):
         "photos": photos,
         "plane": {"photo_id": base["id"], "corners": POSES["diffuse"], "size": list(size)},
         "regions": training_regions(),
-        "registrations": {
-            photo["id"]: {"base_photo_id": base["id"], "corners": POSES[photo["role"]], "support_percent": 100}
-            for photo in photos[1:]
-        },
+        "registrations": registrations,
     }
 
 

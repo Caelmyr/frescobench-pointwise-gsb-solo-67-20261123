@@ -1,7 +1,7 @@
 import {badge, btn, e, img, link, n, percent, plot, stat, table, date, dots} from "./widgets.js";
 
 const colors = ["#58836b","#b26a4a","#818d40","#786f99"];
-const layers = {overlay:"Measurement map",source:"Source plane",paired:"Paired plane",reference:"Reference image"};
+const layers = {overlay:"Measurement map",source:"Source plane",paired:"After-cleaning plane",reference:"Reference image"};
 
 export function metricSet(record) {
   const m = record.metrics;
@@ -27,6 +27,7 @@ export function metricSet(record) {
     joint: () => [["Measured stations",m.measured_stations],["Unmeasured stations",m.unmeasured_stations],["Median absolute contrast",n(m.median_absolute_step,4)]],
     scribe: () => [["Median exposure width",m.median_width==null?"—":`${n(m.median_width,3)} ${m.length_unit}`],["Maximum exposure width",m.maximum_width==null?"—":`${n(m.maximum_width,3)} ${m.length_unit}`],["Both sides measured",`${m.observed_stations}/${m.requested_stations}`]],
     aggregate: () => [["Bright clusters",m.candidate_clusters],["Supported pixels",m.observed_pixels],["Bright fraction",percent(m.bright_fraction_of_support)]],
+    "cleaning-check": () => [["Bare before",percent(m.before.percent.bare)],["Bare after",percent(m.after.percent.bare)],["Bare change",percent(m.bare_change_percent)],["Eligible region",percent(m.eligible_percent_of_box)]],
   }[record.kind]();
   return `<div class="metrics">${rows.map(([name,value])=>stat(name,value)).join("")}</div>`;
 }
@@ -135,6 +136,16 @@ function referenceDetail(m) {
     <p class="notice">${e(m.capture_note)}</p>`;
 }
 
+function cleaningCheckDetail(m) {
+  return `<h3>${e(m.study_title)} · ${e(m.region_name)}</h3>
+    <p class="notice">Only the ${n(m.eligible_pixels,0)} px intersecting the frozen study region at positions observed by its photos enter the measurement (${percent(m.eligible_percent_of_box)} of the drawn box).</p>
+    ${table(["Stage","Bare plaster","Mixed","Intact pigment","Unmeasured","Measured px"],[
+      ["Before",...["bare","mixed","glazed","unmeasured"].map(key=>percent(m.before.percent[key])),n(m.before.measured,0)],
+      ["After",...["bare","mixed","glazed","unmeasured"].map(key=>percent(m.after.percent[key])),n(m.after.measured,0)],
+    ])}
+    <div class="metrics">${stat("Bare plaster change",percent(m.bare_change_percent))}</div>`;
+}
+
 function details(record) {
   const render = {
     weave:m=>`<h3>Visible texture families</h3><p class="plot-note">${e(m.note)}</p>${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak / background"],m.rows.map(item=>[item.family,n(item.angle_degrees,2),n(item.pitch,3),n(item.peak_to_background,2)]))}`,
@@ -149,6 +160,7 @@ function details(record) {
     color:colorDetail,coverage:coverageDetail,defects:defectsDetail,glare:glareDetail,
     direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
     marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,scribe:scribeDetail,
+    "cleaning-check":m=>cleaningCheckDetail(m),
   }[record.kind];
   return render(record.kind==="defects" ? record : record.metrics);
 }

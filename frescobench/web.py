@@ -7,6 +7,7 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .cleaning import cleaning_candidates, create_cleaning_check, create_cleaning_study
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
@@ -245,6 +246,12 @@ def register_measurements(api, store, heavy):
             record = evaluate(store, specimen_id, json_request())
         return jsonify(record), 201
 
+    @api.post("/specimens/<specimen_id>/cleaning-checks")
+    def cleaning_check_add(specimen_id):
+        with heavy:
+            record = create_cleaning_check(store, specimen_id, json_request())
+        return jsonify(record), 201
+
     @api.get("/results/<measurement_id>")
     def measurement_show(measurement_id):
         return jsonify(store.result(measurement_id))
@@ -349,6 +356,41 @@ def register_artifacts(api, store, heavy):
         for tile_id in surface:
             records.extend(summarize_result(row) for row in store.results(tile_id) if row["kind"] in allowed)
         return jsonify({"items": records})
+
+    @api.get("/cleaning/candidates")
+    def cleaning_candidate_list():
+        eligible, rejected = cleaning_candidates(store)
+        grouped = {}
+        for pair in eligible:
+            grouped.setdefault(pair.tile_id, []).append(pair)
+        items = []
+        for tile_id, choices in grouped.items():
+            first = choices[0]
+            items.append({
+                "tile_id": tile_id,
+                "tile_name": first.tile_name,
+                "width_mm": first.width_mm,
+                "height_mm": first.height_mm,
+                "before_photo_id": first.before_photo_id,
+                "after_photo_id": first.after_photo_id,
+                "region_options": [
+                    {"region_id": pair.region_id, "region_name": pair.region_name} for pair in choices
+                ],
+            })
+        return jsonify({"items": items, "rejected": rejected})
+
+    @api.post("/cleaning/studies")
+    def cleaning_study_make():
+        with heavy:
+            report = create_cleaning_study(store, json_request())
+        return jsonify(report), 201
+
+    @api.get("/studies/<study_id>/common-mask.png")
+    def cleaning_study_mask(study_id):
+        study = store.study(study_id)
+        if study.get("study_type") != "cleaning":
+            raise MissingError("Common region mask exists only for cleaning studies.")
+        return png_blob(store, study["common_mask_digest"])
 
     @api.get("/studies")
     def study_history():

@@ -30,7 +30,10 @@ ROLE_LABELS = {
     "rake-left": "Raking light from left",
     "rake-right": "Raking light from right",
     "reference": "Reference capture",
+    "before": "Before cleaning",
+    "after": "After cleaning",
 }
+CLEANING_ROLES = ("before", "after")
 REGION_PURPOSES = {
     "inspection": "Inspection area",
     "bare": "Bare plaster reference sample",
@@ -57,6 +60,7 @@ ANALYSIS_LABELS = {
     "joint": "Seam contrast",
     "scribe": "Loss margin width",
     "aggregate": "Pale mineral flecks",
+    "cleaning-check": "Cleaning study re-check",
 }
 
 
